@@ -39,6 +39,14 @@ def get_merged_map(sheet):
     return merged, covered
 
 
+def cell_text(sheet, r, c) -> str:
+    cell = sheet.cell(r, c)
+    val = str(cell.value).strip() if cell.value is not None else ""
+    if val and cell.font and cell.font.strike:
+        val = f"~~{val}~~"
+    return val
+
+
 def sheet_to_markdown(sheet) -> str:
     if sheet.max_row is None or sheet.max_column is None:
         return "_empty sheet_\n"
@@ -54,13 +62,12 @@ def sheet_to_markdown(sheet) -> str:
                 continue
             if (r, c) in merged_map:
                 val, rowspan, colspan = merged_map[(r, c)]
-                cell_str = str(val).strip() if val is not None else ""
+                cell_str = cell_text(sheet, r, c)
                 if rowspan > 1 or colspan > 1:
                     cell_str = f"{cell_str}[{rowspan}r×{colspan}c]" if cell_str else f"[{rowspan}r×{colspan}c]"
                 row.append(cell_str)
             else:
-                val = sheet.cell(r, c).value
-                row.append(str(val).strip() if val is not None else "")
+                row.append(cell_text(sheet, r, c))
         # trim trailing empty cells
         while row and row[-1] == "":
             row.pop()
