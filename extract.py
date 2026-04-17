@@ -40,11 +40,34 @@ def get_merged_map(sheet):
 
 
 def cell_text(sheet, r, c) -> str:
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
     cell = sheet.cell(r, c)
-    val = str(cell.value).strip() if cell.value is not None else ""
-    if val and cell.font and cell.font.strike:
-        val = f"~~{val}~~"
-    return val
+    if cell.value is None:
+        return ""
+    if isinstance(cell.value, CellRichText):
+        cell_strike = bool(cell.font and cell.font.strike)
+        parts = []
+        for run in cell.value:
+            if isinstance(run, TextBlock):
+                text = run.text or ""
+                strike = bool(run.font.strike) if run.font else cell_strike
+                if strike:
+                    text = f"~~{text}~~"
+                parts.append(text)
+            else:
+                # plain str inherits cell-level font
+                text = str(run)
+                if cell_strike:
+                    text = f"~~{text}~~"
+                parts.append(text)
+        result = "".join(parts).strip()
+    else:
+        result = str(cell.value).strip()
+        if result and cell.font and cell.font.strike:
+            result = f"~~{result}~~"
+    # newline inside a table cell breaks markdown — collapse to space
+    result = result.replace("\n", " ").replace("\r", "")
+    return result
 
 
 def sheet_to_markdown(sheet) -> str:
@@ -133,7 +156,7 @@ def extract(xlsx_path: str, output_dir: str = "output"):
     images_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading {src.name} ...")
-    wb = load_workbook(src, data_only=True)
+    wb = load_workbook(src, data_only=True, rich_text=True)
 
     manifest = {"source": src.name, "sheets": []}
 
