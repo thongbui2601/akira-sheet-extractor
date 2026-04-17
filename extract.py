@@ -54,33 +54,33 @@ def sheet_to_markdown(sheet) -> str:
                 continue
             if (r, c) in merged_map:
                 val, rowspan, colspan = merged_map[(r, c)]
-                cell_str = str(val) if val is not None else ""
+                cell_str = str(val).strip() if val is not None else ""
                 if rowspan > 1 or colspan > 1:
-                    cell_str = f"{cell_str} [merged {rowspan}r×{colspan}c]"
+                    cell_str = f"{cell_str}[{rowspan}r×{colspan}c]" if cell_str else f"[{rowspan}r×{colspan}c]"
                 row.append(cell_str)
             else:
                 val = sheet.cell(r, c).value
-                row.append(str(val) if val is not None else "")
+                row.append(str(val).strip() if val is not None else "")
+        # trim trailing empty cells
+        while row and row[-1] == "":
+            row.pop()
         rows.append(row)
+
+    # drop fully empty rows
+    rows = [r for r in rows if any(c != "" for c in r)]
 
     if not rows:
         return "_empty sheet_\n"
 
     col_count = max(len(r) for r in rows)
-
-    # Pad rows to equal length
     rows = [r + [""] * (col_count - len(r)) for r in rows]
 
-    # Column widths for alignment
-    widths = [max(len(rows[r][c]) for r in range(len(rows))) for c in range(col_count)]
-    widths = [max(w, 3) for w in widths]
-
     def fmt_row(row):
-        return "| " + " | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)) + " |"
+        return "|" + "|".join(row) + "|"
 
     lines = []
     lines.append(fmt_row(rows[0]))
-    lines.append("| " + " | ".join("-" * widths[i] for i in range(col_count)) + " |")
+    lines.append("|" + "|".join("---" for _ in range(col_count)) + "|")
     for row in rows[1:]:
         lines.append(fmt_row(row))
 
