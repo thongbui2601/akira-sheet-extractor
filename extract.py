@@ -262,6 +262,11 @@ def extract(xlsx_path: str, output_dir: str = "output", formats: list = None):
         print(f"  Images : {total_images}")
         print(f"  Manifest: {fmt_dir / 'manifest.json'}")
 
+    how_to = Path(__file__).parent / "HOW_TO_READ.md"
+    if how_to.exists():
+        import shutil
+        shutil.copy2(how_to, out / "HOW_TO_READ.md")
+
     print(f"\nDone! Output in '{out}/')")
 
 
