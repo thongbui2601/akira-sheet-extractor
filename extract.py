@@ -70,11 +70,12 @@ def cell_text(sheet, r, c) -> str:
     return result
 
 
-def sheet_to_markdown(sheet) -> str:
+def sheet_to_markdown(sheet, img_map: dict = None) -> str:
     if sheet.max_row is None or sheet.max_column is None:
         return "_empty sheet_\n"
 
     merged_map, covered = get_merged_map(sheet)
+    img_map = img_map or {}
 
     rows = []
     for r in range(1, sheet.max_row + 1):
@@ -83,14 +84,16 @@ def sheet_to_markdown(sheet) -> str:
             if (r, c) in covered:
                 row.append("")
                 continue
+            cell_str = cell_text(sheet, r, c)
             if (r, c) in merged_map:
-                val, rowspan, colspan = merged_map[(r, c)]
-                cell_str = cell_text(sheet, r, c)
+                _, rowspan, colspan = merged_map[(r, c)]
                 if rowspan > 1 or colspan > 1:
                     cell_str = f"{cell_str}[{rowspan}r×{colspan}c]" if cell_str else f"[{rowspan}r×{colspan}c]"
-                row.append(cell_str)
-            else:
-                row.append(cell_text(sheet, r, c))
+            imgs = img_map.get((r, c), [])
+            if imgs:
+                img_md = " ".join(f"![]('../{f}')" for f in imgs)
+                cell_str = f"{cell_str} {img_md}".strip()
+            row.append(cell_str)
         # trim trailing empty cells
         while row and row[-1] == "":
             row.pop()
@@ -115,6 +118,50 @@ def sheet_to_markdown(sheet) -> str:
         lines.append(fmt_row(row))
 
     return "\n".join(lines) + "\n"
+
+
+def md_strike_to_html(text: str) -> str:
+    return re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+
+
+def sheet_to_html(sheet, img_map: dict = None) -> str:
+    if sheet.max_row is None or sheet.max_column is None:
+        return "<p><em>empty sheet</em></p>\n"
+
+    merged_map, covered = get_merged_map(sheet)
+    img_map = img_map or {}
+    TD = 'style="border:1px solid #ccc;padding:4px"'
+
+    rows_html = []
+    for r in range(1, sheet.max_row + 1):
+        cells = []
+        for c in range(1, sheet.max_column + 1):
+            if (r, c) in covered:
+                continue
+            text = md_strike_to_html(cell_text(sheet, r, c))
+            imgs = img_map.get((r, c), [])
+            if imgs:
+                img_tags = "".join(f'<img src="../{f}" style="max-width:100%">' for f in imgs)
+                text = f"{text}{img_tags}" if text else img_tags
+            if (r, c) in merged_map:
+                _, rowspan, colspan = merged_map[(r, c)]
+                attrs = TD
+                if rowspan > 1:
+                    attrs += f' rowspan="{rowspan}"'
+                if colspan > 1:
+                    attrs += f' colspan="{colspan}"'
+                cells.append(f"<td {attrs}>{text}</td>")
+            else:
+                cells.append(f"<td {TD}>{text}</td>")
+        if cells:
+            rows_html.append("  <tr>" + "".join(cells) + "</tr>")
+
+    if not rows_html:
+        return "<p><em>empty sheet</em></p>\n"
+
+    table = '<table style="border-collapse:collapse;font-size:13px">\n<tbody>\n'
+    table += "\n".join(rows_html) + "\n</tbody>\n</table>"
+    return table
 
 
 def extract_images(sheet, images_dir: Path, sheet_slug: str):
@@ -147,46 +194,75 @@ def extract_images(sheet, images_dir: Path, sheet_slug: str):
     return records
 
 
-def extract(xlsx_path: str, output_dir: str = "output"):
-    src = Path(xlsx_path)
-    out = Path(output_dir)
-    sheets_dir = out / "sheets"
-    images_dir = out / "images"
+def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str):
+    """Extract all sheets for a single format into fmt_dir."""
+    sheets_dir = fmt_dir / "sheets"
+    images_dir = fmt_dir / "images"
     sheets_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading {src.name} ...")
-    wb = load_workbook(src, data_only=True, rich_text=True)
-
-    manifest = {"source": src.name, "sheets": []}
+    manifest = {"source": src_name, "format": fmt, "sheets": []}
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         slug = slugify(sheet_name)
-        print(f"  Sheet: {sheet_name}")
-
-        md = sheet_to_markdown(ws)
-        md_file = sheets_dir / f"{slug}.md"
-        md_file.write_text(f"# {sheet_name}\n\n{md}", encoding="utf-8")
 
         images = extract_images(ws, images_dir, slug)
+        img_map = {}
+        for rec in images:
+            if rec.get("row") and rec.get("col"):
+                img_map.setdefault((rec["row"], rec["col"]), []).append(rec["file"])
+
+        if fmt == "html":
+            content = sheet_to_html(ws, img_map=img_map)
+            sheet_file = sheets_dir / f"{slug}.html"
+            html_doc = (
+                f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+                f"<title>{sheet_name}</title></head><body>"
+                f"<h1>{sheet_name}</h1>{content}</body></html>"
+            )
+            sheet_file.write_text(html_doc, encoding="utf-8")
+        else:
+            content = sheet_to_markdown(ws, img_map=img_map)
+            sheet_file = sheets_dir / f"{slug}.md"
+            sheet_file.write_text(f"# {sheet_name}\n\n{content}", encoding="utf-8")
 
         manifest["sheets"].append({
             "name": sheet_name,
-            "markdown_file": f"sheets/{slug}.md",
+            "sheet_file": f"sheets/{sheet_file.name}",
             "rows": ws.max_row,
             "cols": ws.max_column,
             "images": images,
         })
 
-    manifest_path = out / "manifest.json"
+    manifest_path = fmt_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
 
-    total_images = sum(len(s["images"]) for s in manifest["sheets"])
-    print(f"\nDone! Output in '{out}/'")
-    print(f"  Sheets : {len(manifest['sheets'])}")
-    print(f"  Images : {total_images}")
-    print(f"  Manifest: {manifest_path}")
+
+def extract(xlsx_path: str, output_dir: str = "output", formats: list = None):
+    if formats is None:
+        formats = ["md"]
+    src = Path(xlsx_path)
+    out = Path(output_dir)
+
+    print(f"Loading {src.name} ...")
+    wb = load_workbook(src, data_only=True, rich_text=True)
+
+    fmt_label = {"md": "markdown", "html": "html"}
+    total_sheets = len(wb.sheetnames)
+
+    for fmt in formats:
+        label = fmt_label.get(fmt, fmt)
+        fmt_dir = out / label
+        print(f"\n[{label}]")
+        manifest = _extract_one_format(wb, src.name, fmt_dir, fmt)
+        total_images = sum(len(s["images"]) for s in manifest["sheets"])
+        print(f"  Sheets : {total_sheets}")
+        print(f"  Images : {total_images}")
+        print(f"  Manifest: {fmt_dir / 'manifest.json'}")
+
+    print(f"\nDone! Output in '{out}/')")
 
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -255,29 +331,41 @@ def run_gui():
             self.open_output_btn = ttk.Button(frm, text="Open Folder", command=self._open_output_folder)
             self.open_output_btn.grid(row=5, column=2, sticky="e", **pad)
 
+            # --- Format checkboxes ---
+            ttk.Label(frm, text="Format").grid(row=6, column=0, sticky="w", **pad)
+            self.fmt_md_var = tk.BooleanVar(value=True)
+            self.fmt_html_var = tk.BooleanVar(value=False)
+            fmt_frm = ttk.Frame(frm)
+            fmt_frm.grid(row=6, column=1, columnspan=2, sticky="w", **pad)
+            ttk.Checkbutton(fmt_frm, text="Markdown", variable=self.fmt_md_var).pack(side="left")
+            ttk.Checkbutton(fmt_frm, text="HTML", variable=self.fmt_html_var).pack(side="left", padx=(8, 0))
+
             # --- Extract button ---
             self.extract_btn = ttk.Button(frm, text="Extract", command=self._run_extract)
-            self.extract_btn.grid(row=6, column=0, columnspan=3, pady=10)
+            self.extract_btn.grid(row=7, column=0, columnspan=3, pady=10)
 
             # --- Log ---
             self.log = tk.Text(frm, height=14, state="disabled", wrap="word", bg="#1e1e1e", fg="#d4d4d4",
                                font=("Consolas", 9))
-            self.log.grid(row=7, column=0, columnspan=3, sticky="nsew", **pad)
-            frm.rowconfigure(7, weight=1)
+            self.log.grid(row=8, column=0, columnspan=3, sticky="nsew", **pad)
+            frm.rowconfigure(8, weight=1)
             sb = ttk.Scrollbar(frm, command=self.log.yview)
-            sb.grid(row=7, column=3, sticky="ns")
+            sb.grid(row=8, column=3, sticky="ns")
             self.log["yscrollcommand"] = sb.set
 
         def _load_config(self):
             cfg = load_config()
             xlsx = cfg.get("last_xlsx", "")
             out = cfg.get("last_output", "")
+            fmts = cfg.get("last_formats", ["md"])
             if xlsx:
                 self.xlsx_var.set(xlsx)
             if out:
                 self.out_var.set(out)
             else:
                 self.out_var.set(str(Path(__file__).parent / "output"))
+            self.fmt_md_var.set("md" in fmts)
+            self.fmt_html_var.set("html" in fmts)
 
         def _browse_xlsx(self):
             path = filedialog.askopenfilename(
@@ -332,6 +420,15 @@ def run_gui():
                 messagebox.showerror("Lỗi", f"File không tồn tại:\n{xlsx}")
                 return
 
+            fmts = []
+            if self.fmt_md_var.get():
+                fmts.append("md")
+            if self.fmt_html_var.get():
+                fmts.append("html")
+            if not fmts:
+                messagebox.showerror("Lỗi", "Chọn ít nhất một format (Markdown hoặc HTML).")
+                return
+
             self.extract_btn.configure(state="disabled", text="Đang xử lý…")
             self._log_write(f"\n--- Extract: {Path(xlsx).name} ---\n")
 
@@ -342,8 +439,8 @@ def run_gui():
                 sys.stderr = writer
                 try:
                     file_slug = slugify(Path(xlsx).stem)
-                    extract(xlsx, str(Path(out) / file_slug))
-                    save_config({"last_xlsx": xlsx, "last_output": out})
+                    extract(xlsx, str(Path(out) / file_slug), formats=fmts)
+                    save_config({"last_xlsx": xlsx, "last_output": out, "last_formats": fmts})
                 except Exception as e:
                     self.log_queue.put(f"\n[ERROR] {e}\n")
                 finally:
@@ -358,16 +455,22 @@ def run_gui():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
+    import argparse
+    parser = argparse.ArgumentParser(prog="extract", add_help=True)
+    parser.add_argument("xlsx", nargs="?", help="Path to .xlsx file")
+    parser.add_argument("output_dir", nargs="?", default="output", help="Base output directory")
+    parser.add_argument("--format", choices=["md", "html"], nargs="+", default=["md"], dest="formats",
+                        help="Output format(s): md and/or html (default: md)")
+    args = parser.parse_args()
+
+    if not args.xlsx:
         try:
             import tkinter  # noqa: F401
             run_gui()
         except ImportError:
-            print("Usage: python extract.py <file.xlsx> [output_dir]")
+            parser.print_help()
             sys.exit(1)
     else:
-        xlsx = sys.argv[1]
-        base_out = sys.argv[2] if len(sys.argv) > 2 else "output"
-        file_slug = slugify(Path(xlsx).stem)
-        out = str(Path(base_out) / file_slug)
-        extract(xlsx, out)
+        file_slug = slugify(Path(args.xlsx).stem)
+        out = str(Path(args.output_dir) / file_slug)
+        extract(args.xlsx, out, formats=args.formats)
