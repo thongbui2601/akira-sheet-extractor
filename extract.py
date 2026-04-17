@@ -189,18 +189,185 @@ def extract(xlsx_path: str, output_dir: str = "output"):
     print(f"  Manifest: {manifest_path}")
 
 
+CONFIG_PATH = Path(__file__).parent / "config.json"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_config(data: dict):
+    CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def run_gui():
+    import queue
+    import threading
+    import os
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+
+    class QueueWriter:
+        def __init__(self, q):
+            self.q = q
+        def write(self, text):
+            if text:
+                self.q.put(text)
+        def flush(self):
+            pass
+
+    class ExtractorApp:
+        def __init__(self, root):
+            self.root = root
+            self.root.title("akira-sheet-extractor")
+            self.root.resizable(True, True)
+            self.log_queue = queue.Queue()
+            self._build_ui()
+            self._load_config()
+            self.root.after(100, self._poll_log)
+
+        def _build_ui(self):
+            pad = {"padx": 8, "pady": 4}
+            frm = ttk.Frame(self.root, padding=10)
+            frm.grid(sticky="nsew")
+            self.root.columnconfigure(0, weight=1)
+            self.root.rowconfigure(0, weight=1)
+            frm.columnconfigure(1, weight=1)
+
+            # --- Input file ---
+            ttk.Label(frm, text="Input file (.xlsx)").grid(row=0, column=0, columnspan=3, sticky="w", **pad)
+            self.xlsx_var = tk.StringVar()
+            self.xlsx_entry = ttk.Entry(frm, textvariable=self.xlsx_var, width=55)
+            self.xlsx_entry.grid(row=1, column=0, columnspan=2, sticky="ew", **pad)
+            ttk.Button(frm, text="Browse…", command=self._browse_xlsx).grid(row=1, column=2, **pad)
+            self.open_input_btn = ttk.Button(frm, text="Open Folder", command=self._open_input_folder)
+            self.open_input_btn.grid(row=2, column=2, sticky="e", **pad)
+
+            # --- Output folder ---
+            ttk.Label(frm, text="Output folder").grid(row=3, column=0, columnspan=3, sticky="w", **pad)
+            self.out_var = tk.StringVar()
+            self.out_entry = ttk.Entry(frm, textvariable=self.out_var, width=55)
+            self.out_entry.grid(row=4, column=0, columnspan=2, sticky="ew", **pad)
+            ttk.Button(frm, text="Browse…", command=self._browse_output).grid(row=4, column=2, **pad)
+            self.open_output_btn = ttk.Button(frm, text="Open Folder", command=self._open_output_folder)
+            self.open_output_btn.grid(row=5, column=2, sticky="e", **pad)
+
+            # --- Extract button ---
+            self.extract_btn = ttk.Button(frm, text="Extract", command=self._run_extract)
+            self.extract_btn.grid(row=6, column=0, columnspan=3, pady=10)
+
+            # --- Log ---
+            self.log = tk.Text(frm, height=14, state="disabled", wrap="word", bg="#1e1e1e", fg="#d4d4d4",
+                               font=("Consolas", 9))
+            self.log.grid(row=7, column=0, columnspan=3, sticky="nsew", **pad)
+            frm.rowconfigure(7, weight=1)
+            sb = ttk.Scrollbar(frm, command=self.log.yview)
+            sb.grid(row=7, column=3, sticky="ns")
+            self.log["yscrollcommand"] = sb.set
+
+        def _load_config(self):
+            cfg = load_config()
+            xlsx = cfg.get("last_xlsx", "")
+            out = cfg.get("last_output", "")
+            if xlsx:
+                self.xlsx_var.set(xlsx)
+            if out:
+                self.out_var.set(out)
+            else:
+                self.out_var.set(str(Path(__file__).parent / "output"))
+
+        def _browse_xlsx(self):
+            path = filedialog.askopenfilename(
+                title="Chọn file Excel",
+                filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+            )
+            if path:
+                self.xlsx_var.set(path)
+                if not self.out_var.get().strip():
+                    self.out_var.set(str(Path(path).parent / "output"))
+
+        def _browse_output(self):
+            path = filedialog.askdirectory(title="Chọn output folder")
+            if path:
+                self.out_var.set(path)
+
+        def _open_input_folder(self):
+            xlsx = self.xlsx_var.get().strip()
+            folder = str(Path(xlsx).parent) if xlsx else ""
+            if folder and Path(folder).exists():
+                os.startfile(folder)
+
+        def _open_output_folder(self):
+            out = self.out_var.get().strip()
+            if out and Path(out).exists():
+                os.startfile(out)
+            else:
+                messagebox.showinfo("Thông báo", "Folder chưa tồn tại. Hãy chạy Extract trước.")
+
+        def _log_write(self, text):
+            self.log.configure(state="normal")
+            self.log.insert("end", text)
+            self.log.see("end")
+            self.log.configure(state="disabled")
+
+        def _poll_log(self):
+            while True:
+                try:
+                    self._log_write(self.log_queue.get_nowait())
+                except Exception:
+                    break
+            self.root.after(100, self._poll_log)
+
+        def _run_extract(self):
+            xlsx = self.xlsx_var.get().strip()
+            out = self.out_var.get().strip() or str(Path(__file__).parent / "output")
+
+            if not xlsx:
+                messagebox.showerror("Lỗi", "Chưa chọn file xlsx.")
+                return
+            if not Path(xlsx).exists():
+                messagebox.showerror("Lỗi", f"File không tồn tại:\n{xlsx}")
+                return
+
+            self.extract_btn.configure(state="disabled", text="Đang xử lý…")
+            self._log_write(f"\n--- Extract: {Path(xlsx).name} ---\n")
+
+            def worker():
+                old_stdout, old_stderr = sys.stdout, sys.stderr
+                writer = QueueWriter(self.log_queue)
+                sys.stdout = writer
+                sys.stderr = writer
+                try:
+                    file_slug = slugify(Path(xlsx).stem)
+                    extract(xlsx, str(Path(out) / file_slug))
+                    save_config({"last_xlsx": xlsx, "last_output": out})
+                except Exception as e:
+                    self.log_queue.put(f"\n[ERROR] {e}\n")
+                finally:
+                    sys.stdout, sys.stderr = old_stdout, old_stderr
+                    self.root.after(0, lambda: self.extract_btn.configure(state="normal", text="Extract"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+    root = tk.Tk()
+    app = ExtractorApp(root)
+    root.mainloop()
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        # default to first xlsx in current dir
-        files = list(Path(".").glob("*.xlsx"))
-        if not files:
+        try:
+            import tkinter  # noqa: F401
+            run_gui()
+        except ImportError:
             print("Usage: python extract.py <file.xlsx> [output_dir]")
             sys.exit(1)
-        xlsx = str(files[0])
     else:
         xlsx = sys.argv[1]
-
-    base_out = sys.argv[2] if len(sys.argv) > 2 else "output"
-    file_slug = slugify(Path(xlsx).stem)
-    out = str(Path(base_out) / file_slug)
-    extract(xlsx, out)
+        base_out = sys.argv[2] if len(sys.argv) > 2 else "output"
+        file_slug = slugify(Path(xlsx).stem)
+        out = str(Path(base_out) / file_slug)
+        extract(xlsx, out)
