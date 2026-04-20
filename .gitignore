@@ -2,3 +2,4 @@
 *.xls
 output/
 /output_test
+/.claude

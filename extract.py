@@ -132,9 +132,10 @@ def sheet_to_html(sheet, img_map: dict = None) -> str:
     img_map = img_map or {}
     TD = 'style="border:1px solid #ccc;padding:4px"'
 
-    rows_html = []
+    all_rows = []
     for r in range(1, sheet.max_row + 1):
         cells = []
+        has_content = False
         for c in range(1, sheet.max_column + 1):
             if (r, c) in covered:
                 continue
@@ -143,6 +144,8 @@ def sheet_to_html(sheet, img_map: dict = None) -> str:
             if imgs:
                 img_tags = "".join(f'<img src="../{f}" style="max-width:100%">' for f in imgs)
                 text = f"{text}{img_tags}" if text else img_tags
+            if text or imgs:
+                has_content = True
             if (r, c) in merged_map:
                 _, rowspan, colspan = merged_map[(r, c)]
                 attrs = TD
@@ -153,8 +156,10 @@ def sheet_to_html(sheet, img_map: dict = None) -> str:
                 cells.append(f"<td {attrs}>{text}</td>")
             else:
                 cells.append(f"<td {TD}>{text}</td>")
-        if cells:
-            rows_html.append("  <tr>" + "".join(cells) + "</tr>")
+        if cells and has_content:
+            all_rows.append(cells)
+
+    rows_html = ["  <tr>" + "".join(cells) + "</tr>" for cells in all_rows]
 
     if not rows_html:
         return "<p><em>empty sheet</em></p>\n"
