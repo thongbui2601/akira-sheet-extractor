@@ -3,3 +3,4 @@
 output/
 /output_test
 /.claude
+config.json

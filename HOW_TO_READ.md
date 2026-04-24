@@ -1,99 +1,99 @@
-# Hướng dẫn đọc output cho AI
+# How to Read the Output (for AI)
 
-File này giải thích cấu trúc output được tạo bởi **akira-sheet-extractor** từ file `.xlsx`.
+This file explains the output structure produced by **akira-sheet-extractor** from `.xlsx` files.
 
-## Cấu trúc thư mục
+## Directory Structure
 
 ```
 output/
-└── <tên_file_excel>/
-    ├── markdown/               # có nếu chạy với format md
+└── <excel_filename>/
+    ├── markdown/               # present when run with md format
     │   ├── sheets/*.md
     │   ├── images/
     │   └── manifest.json
-    ├── html/                   # có nếu chạy với format html
+    ├── html/                   # present when run with html format
     │   ├── sheets/*.html
     │   ├── images/
     │   └── manifest.json
-    └── (cả hai nếu chọn cùng lúc)
+    └── (both if both formats selected)
 ```
 
-## Bước đọc đề xuất
+## Recommended Reading Order
 
-1. Đọc `manifest.json` để nắm danh sách sheet, số dòng/cột, và vị trí ảnh
-2. Đọc từng file trong `sheets/` theo thứ tự hoặc theo tên sheet cần thiết
-3. Ảnh lưu trong `images/`, tọa độ cell được ghi trong manifest
+1. Read `manifest.json` to get the sheet list, row/column counts, and image positions.
+2. Read each file under `sheets/` in order, or by the sheet name you need.
+3. Images are stored in `images/`; their cell coordinates are recorded in the manifest.
 
 ---
 
-## Quy ước Markdown
+## Markdown Conventions
 
-### Bảng
-- Mỗi sheet là 1 file `.md` với header `# Tên Sheet` và bảng phía dưới
-- Hàng và cột rỗng hoàn toàn bị lược bỏ để giảm noise
+### Tables
+- Each sheet is one `.md` file with a `# Sheet Name` header followed by a table.
+- Completely empty rows and columns are omitted to reduce noise.
 
-### Ô merge
-Ô merge chỉ có nội dung ở **ô đầu tiên (top-left)**, các ô bị bao phủ bị bỏ trống. Kích thước được ghi chú ngay sau giá trị:
+### Merged Cells
+The top-left cell holds the value; covered cells are left empty. The span is annotated right after the value:
 
 ```
-|Tiêu đề[2r×3c]|...|
+|Title[2r×3c]|...|
 ```
 
-`[2r×3c]` = ô này span 2 hàng × 3 cột.
+`[2r×3c]` means the cell spans 2 rows × 3 columns.
 
 ### Strikethrough
 ```
-~~nội dung cũ~~ nội dung mới
+~~old content~~ new content
 ```
-`~~...~~` là nội dung đã bị **xóa hoặc thay thế** — đọc kèm phần text liền sau để hiểu sự thay đổi.
+`~~...~~` marks content that has been **deleted or replaced** — read it together with the text that follows to understand the change.
 
-### Ảnh nhúng
+### Embedded Images
 ```
 ![](../images/sheet_img_1.png)
 ```
-Ảnh được inject vào đúng cell có anchor trong file Excel gốc.
+Images are injected into the cell that matches their anchor position in the original Excel file.
 
 ---
 
-## Quy ước HTML
+## HTML Conventions
 
-### Ô merge
-Dùng thuộc tính chuẩn HTML — đọc như bình thường:
+### Merged Cells
+Standard HTML attributes — read as normal:
 ```html
-<td rowspan="2" colspan="3">Tiêu đề</td>
+<td rowspan="2" colspan="3">Title</td>
 ```
 
 ### Strikethrough
 ```html
-<s>nội dung cũ</s> nội dung mới
+<s>old content</s> new content
 ```
 
-### Ảnh nhúng
+### Embedded Images
 ```html
 <img src="../images/sheet_img_1.png">
 ```
 
 ---
 
-## Cấu trúc manifest.json
+## manifest.json Structure
 
 ```json
 {
-  "source": "tên_file.xlsx",
+  "source": "filename.xlsx",
   "format": "md",
   "sheets": [
     {
-      "name": "Tên sheet gốc",
-      "sheet_file": "sheets/ten_sheet.md",
+      "name": "Original Sheet Name",
+      "sheet_file": "sheets/sheet_name.md",
       "rows": 50,
       "cols": 10,
       "images": [
-        {"file": "images/ten_sheet_img_1.png", "row": 3, "col": 2, "cell": "B3"}
+        {"file": "images/sheet_name_img_1.png", "row": 3, "col": 2, "cell": "B3"}
       ]
     }
   ]
 }
 ```
 
-- `rows` / `cols`: kích thước vùng dữ liệu của sheet
-- `images[].cell`: tọa độ Excel (ví dụ `B3`) nơi ảnh được neo trong file gốc
+- `rows` / `cols`: data area dimensions of the sheet.
+- `images[].cell`: Excel coordinate (e.g. `B3`) where the image is anchored in the original file.

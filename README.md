@@ -30,6 +30,15 @@ Output goes to `output/<filename>/` by default.
 pip install openpyxl pillow
 ```
 
+> **Using a virtual environment?**
+> The GUI (`gui.py`) requires `tkinter`, which is **not pip-installable** — it ships with the system Python but is often missing from venv environments.
+>
+> - **Windows**: reinstall Python from [python.org](https://www.python.org/downloads/) and check **"tcl/tk and IDLE"** during setup.
+> - **Linux (Debian/Ubuntu)**: `sudo apt install python3-tk`
+> - **macOS (Homebrew)**: `brew install python-tk`
+>
+> After installing, recreate your venv from the system Python that has tkinter.
+
 ## Markdown format
 
 - Merged cells are annotated: `value[2r×3c]`
