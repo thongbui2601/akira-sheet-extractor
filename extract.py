@@ -91,7 +91,7 @@ def sheet_to_markdown(sheet, img_map: dict = None) -> str:
                     cell_str = f"{cell_str}[{rowspan}r×{colspan}c]" if cell_str else f"[{rowspan}r×{colspan}c]"
             imgs = img_map.get((r, c), [])
             if imgs:
-                img_md = " ".join(f"![]('../{f}')" for f in imgs)
+                img_md = " ".join(f"![](../{f})" for f in imgs)
                 cell_str = f"{cell_str} {img_md}".strip()
             row.append(cell_str)
         # trim trailing empty cells
