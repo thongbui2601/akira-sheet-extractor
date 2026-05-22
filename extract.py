@@ -5,6 +5,8 @@ import io
 import json
 import re
 import sys
+import hashlib
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
@@ -76,11 +78,15 @@ def sheet_to_markdown(sheet, img_map: dict = None) -> str:
 
     merged_map, covered = get_merged_map(sheet)
     img_map = img_map or {}
+    image_rows = [r for r, _ in img_map.keys() if r]
+    image_cols = [c for _, c in img_map.keys() if c]
+    max_row = max([sheet.max_row] + image_rows)
+    max_col = max([sheet.max_column] + image_cols)
 
     rows = []
-    for r in range(1, sheet.max_row + 1):
+    for r in range(1, max_row + 1):
         row = []
-        for c in range(1, sheet.max_column + 1):
+        for c in range(1, max_col + 1):
             if (r, c) in covered:
                 row.append("")
                 continue
@@ -130,13 +136,17 @@ def sheet_to_html(sheet, img_map: dict = None) -> str:
 
     merged_map, covered = get_merged_map(sheet)
     img_map = img_map or {}
+    image_rows = [r for r, _ in img_map.keys() if r]
+    image_cols = [c for _, c in img_map.keys() if c]
+    max_row = max([sheet.max_row] + image_rows)
+    max_col = max([sheet.max_column] + image_cols)
     TD = 'style="border:1px solid #ccc;padding:4px"'
 
     all_rows = []
-    for r in range(1, sheet.max_row + 1):
+    for r in range(1, max_row + 1):
         cells = []
         has_content = False
-        for c in range(1, sheet.max_column + 1):
+        for c in range(1, max_col + 1):
             if (r, c) in covered:
                 continue
             text = md_strike_to_html(cell_text(sheet, r, c))
@@ -169,7 +179,7 @@ def sheet_to_html(sheet, img_map: dict = None) -> str:
     return table
 
 
-def extract_images(sheet, images_dir: Path, sheet_slug: str):
+def collect_sheet_images(sheet, sheet_slug: str):
     records = []
     for i, img in enumerate(sheet._images):
         try:
@@ -177,8 +187,6 @@ def extract_images(sheet, images_dir: Path, sheet_slug: str):
             pil_img = __import__("PIL.Image", fromlist=["Image"]).open(BytesIO(data))
             ext = pil_img.format.lower() if pil_img.format else "png"
             filename = f"{sheet_slug}_img_{i + 1}.{ext}"
-            out_path = images_dir / filename
-            pil_img.save(out_path)
 
             anchor = img.anchor
             if hasattr(anchor, "_from"):
@@ -193,26 +201,95 @@ def extract_images(sheet, images_dir: Path, sheet_slug: str):
                 "row": row,
                 "col": col,
                 "cell": f"{col_letter}{row}" if col_letter else None,
+                "source": "openpyxl",
+                "status": "mapped" if row and col else "unmapped",
+                "width": getattr(pil_img, "width", None),
+                "height": getattr(pil_img, "height", None),
+                "_data": data,
+                "_hash": hashlib.sha256(data).hexdigest(),
             })
         except Exception as e:
-            records.append({"error": str(e), "index": i})
+            records.append({"error": str(e), "index": i, "source": "openpyxl", "status": "error"})
     return records
 
 
-def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str):
+def collect_images(wb):
+    images_by_sheet = {}
+    known_hashes = set()
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        records = collect_sheet_images(ws, slugify(sheet_name))
+        images_by_sheet[sheet_name] = records
+        for rec in records:
+            if rec.get("_hash"):
+                known_hashes.add(rec["_hash"])
+    return images_by_sheet, known_hashes
+
+
+def collect_unmapped_media(xlsx_path: Path, known_hashes: set):
+    records = []
+    try:
+        with zipfile.ZipFile(xlsx_path) as zf:
+            for info in zf.infolist():
+                if not info.filename.startswith("xl/media/") or info.is_dir():
+                    continue
+                data = zf.read(info.filename)
+                digest = hashlib.sha256(data).hexdigest()
+                if digest in known_hashes:
+                    continue
+                filename = Path(info.filename).name
+                records.append({
+                    "file": f"images/unmapped/{filename}",
+                    "source": info.filename,
+                    "status": "unmapped",
+                    "reason": "media file is not exposed as a worksheet image by openpyxl",
+                    "_data": data,
+                    "_hash": digest,
+                })
+    except Exception as e:
+        records.append({
+            "source": str(xlsx_path),
+            "status": "error",
+            "reason": f"failed to inspect xlsx media: {e}",
+        })
+    return records
+
+
+def public_image_record(rec: dict) -> dict:
+    return {k: v for k, v in rec.items() if not k.startswith("_")}
+
+
+def write_image_records(records: list, fmt_dir: Path):
+    for rec in records:
+        data = rec.get("_data")
+        file = rec.get("file")
+        if not data or not file:
+            continue
+        out_path = fmt_dir / file
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(data)
+
+
+def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sheet: dict, unmapped_media: list):
     """Extract all sheets for a single format into fmt_dir."""
     sheets_dir = fmt_dir / "sheets"
     images_dir = fmt_dir / "images"
     sheets_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest = {"source": src_name, "format": fmt, "sheets": []}
+    manifest = {
+        "source": src_name,
+        "format": fmt,
+        "sheets": [],
+        "unmapped_media": [public_image_record(r) for r in unmapped_media],
+    }
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         slug = slugify(sheet_name)
 
-        images = extract_images(ws, images_dir, slug)
+        images = images_by_sheet.get(sheet_name, [])
+        write_image_records(images, fmt_dir)
         img_map = {}
         for rec in images:
             if rec.get("row") and rec.get("col"):
@@ -237,9 +314,10 @@ def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str):
             "sheet_file": f"sheets/{sheet_file.name}",
             "rows": ws.max_row,
             "cols": ws.max_column,
-            "images": images,
+            "images": [public_image_record(r) for r in images],
         })
 
+    write_image_records(unmapped_media, fmt_dir)
     manifest_path = fmt_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest
@@ -253,6 +331,8 @@ def extract(xlsx_path: str, output_dir: str = "output", formats: list = None):
 
     print(f"Loading {src.name} ...")
     wb = load_workbook(src, data_only=True, rich_text=True)
+    images_by_sheet, known_hashes = collect_images(wb)
+    unmapped_media = collect_unmapped_media(src, known_hashes)
 
     fmt_label = {"md": "markdown", "html": "html"}
     total_sheets = len(wb.sheetnames)
@@ -261,10 +341,12 @@ def extract(xlsx_path: str, output_dir: str = "output", formats: list = None):
         label = fmt_label.get(fmt, fmt)
         fmt_dir = out / label
         print(f"\n[{label}]")
-        manifest = _extract_one_format(wb, src.name, fmt_dir, fmt)
+        manifest = _extract_one_format(wb, src.name, fmt_dir, fmt, images_by_sheet, unmapped_media)
         total_images = sum(len(s["images"]) for s in manifest["sheets"])
         print(f"  Sheets : {total_sheets}")
         print(f"  Images : {total_images}")
+        if manifest.get("unmapped_media"):
+            print(f"  Unmapped media: {len(manifest['unmapped_media'])}")
         print(f"  Manifest: {fmt_dir / 'manifest.json'}")
 
     how_to = Path(__file__).parent / "HOW_TO_READ.md"
