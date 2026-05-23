@@ -6,7 +6,7 @@ Extract `.xlsx` files into compact markdown tables, images, and a manifest — o
 
 For each sheet, generates:
 - `sheets/<sheet>.md` — markdown table (compact, no padding)
-- `images/<sheet>_img_N.png` — embedded images with anchor position
+- `images/<sheet>_img_N.png` — embedded images with OOXML/openpyxl placement metadata
 - `manifest.json` — sheet list, row/col counts, image metadata
 
 ## Usage
@@ -45,6 +45,7 @@ pip install openpyxl pillow
 - Strikethrough text is preserved as `~~text~~`
 - Empty rows and trailing empty cells are trimmed
 - Newlines within cells are collapsed to a space
+- Images are injected into the best visual cell and repeated in a `## Images` section with exact Excel cell/range metadata
 
 ## Warnings
 

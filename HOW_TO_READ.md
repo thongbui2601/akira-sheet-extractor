@@ -49,9 +49,15 @@ The top-left cell holds the value; covered cells are left empty. The span is ann
 
 ### Embedded Images
 ```
-![](../images/sheet_img_1.png)
+<!-- image cell=D10 range=D10:F14 --> ![](../images/sheet_img_1.png)
 ```
-Images are injected into the cell that matches their anchor position in the original Excel file.
+Images are injected near their visual cell when possible. Because Excel images are floating objects and Markdown tables cannot perfectly preserve layout, each sheet also ends with an explicit image layer:
+
+```md
+## Images
+- `D10:F14`, placed at `D10`: ![image at D10](../images/sheet_img_1.png)
+```
+Use this section and `manifest.json` as the reliable source for image-to-cell mapping.
 
 ---
 
@@ -88,7 +94,18 @@ Standard HTML attributes — read as normal:
       "rows": 50,
       "cols": 10,
       "images": [
-        {"file": "images/sheet_name_img_1.png", "row": 3, "col": 2, "cell": "B3"}
+        {
+          "file": "images/sheet_name_img_1.png",
+          "row": 3,
+          "col": 2,
+          "cell": "B3",
+          "anchor_cell": "B3",
+          "visual_cell": "B3",
+          "range": "B3:D6",
+          "anchor_type": "twoCellAnchor",
+          "confidence": "high",
+          "placement": "ooxml"
+        }
       ]
     }
   ]
@@ -96,4 +113,8 @@ Standard HTML attributes — read as normal:
 ```
 
 - `rows` / `cols`: data area dimensions of the sheet.
-- `images[].cell`: Excel coordinate (e.g. `B3`) where the image is anchored in the original file.
+- `images[].cell`: backward-compatible placement cell, usually the visual cell.
+- `images[].anchor_cell`: original top-left anchor cell from Excel.
+- `images[].visual_cell`: best cell for Markdown injection.
+- `images[].range`: Excel cell range covered by the image when available.
+- `images[].confidence`: `high` for two-cell OOXML anchors, `medium` for one-cell/fallback mappings.

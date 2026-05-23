@@ -7,6 +7,8 @@ import re
 import sys
 import hashlib
 import zipfile
+import posixpath
+import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
 
@@ -72,6 +74,22 @@ def cell_text(sheet, r, c) -> str:
     return result
 
 
+def _img_file(img):
+    return img.get("file") if isinstance(img, dict) else img
+
+
+def _img_cell(img):
+    if not isinstance(img, dict):
+        return None
+    return img.get("visual_cell") or img.get("cell")
+
+
+def _img_range(img):
+    if not isinstance(img, dict):
+        return None
+    return img.get("range") or _img_cell(img)
+
+
 def sheet_to_markdown(sheet, img_map: dict = None) -> str:
     if sheet.max_row is None or sheet.max_column is None:
         return "_empty sheet_\n"
@@ -97,7 +115,12 @@ def sheet_to_markdown(sheet, img_map: dict = None) -> str:
                     cell_str = f"{cell_str}[{rowspan}r×{colspan}c]" if cell_str else f"[{rowspan}r×{colspan}c]"
             imgs = img_map.get((r, c), [])
             if imgs:
-                img_md = " ".join(f"![](../{f})" for f in imgs)
+                parts = []
+                for img in imgs:
+                    f = _img_file(img)
+                    meta = f" cell={_img_cell(img)} range={_img_range(img)}" if isinstance(img, dict) else ""
+                    parts.append(f"<!-- image{meta} --> ![](../{f})")
+                img_md = " ".join(parts)
                 cell_str = f"{cell_str} {img_md}".strip()
             row.append(cell_str)
         # trim trailing empty cells
@@ -152,7 +175,7 @@ def sheet_to_html(sheet, img_map: dict = None) -> str:
             text = md_strike_to_html(cell_text(sheet, r, c))
             imgs = img_map.get((r, c), [])
             if imgs:
-                img_tags = "".join(f'<img src="../{f}" style="max-width:100%">' for f in imgs)
+                img_tags = "".join(f'<img src="../{_img_file(img)}" style="max-width:100%">' for img in imgs)
                 text = f"{text}{img_tags}" if text else img_tags
             if text or imgs:
                 has_content = True
@@ -179,32 +202,201 @@ def sheet_to_html(sheet, img_map: dict = None) -> str:
     return table
 
 
+def cell_addr(row, col):
+    return f"{get_column_letter(col)}{row}" if row and col else None
+
+
+def range_addr(from_row, from_col, to_row=None, to_col=None):
+    start = cell_addr(from_row, from_col)
+    end = cell_addr(to_row, to_col) if to_row and to_col else start
+    if not start:
+        return None
+    return start if start == end else f"{start}:{end}"
+
+
+def _rel_path(base_xml_path: str) -> str:
+    folder, name = posixpath.split(base_xml_path)
+    return posixpath.join(folder, "_rels", name + ".rels")
+
+
+def _resolve_target(base_xml_path: str, target: str) -> str:
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(posixpath.dirname(base_xml_path), target))
+
+
+def _read_rels(zf, rels_path: str) -> dict:
+    if rels_path not in zf.namelist():
+        return {}
+    root = ET.fromstring(zf.read(rels_path))
+    rels = {}
+    for rel in root:
+        rid = rel.attrib.get("Id")
+        if rid:
+            rels[rid] = rel.attrib
+    return rels
+
+
+def _first_text(node, local_name: str):
+    found = node.find(f".//{{*}}{local_name}")
+    return found.text if found is not None else None
+
+
+def _marker(anchor, local_name: str):
+    node = anchor.find(f"{{*}}{local_name}")
+    if node is None:
+        return None
+    col = int(_first_text(node, "col") or 0) + 1
+    row = int(_first_text(node, "row") or 0) + 1
+    col_off = int(_first_text(node, "colOff") or 0)
+    row_off = int(_first_text(node, "rowOff") or 0)
+    return {"row": row, "col": col, "rowOff": row_off, "colOff": col_off}
+
+
+def _image_size(data: bytes):
+    try:
+        pil_img = __import__("PIL.Image", fromlist=["Image"]).open(BytesIO(data))
+        return getattr(pil_img, "width", None), getattr(pil_img, "height", None), (pil_img.format.lower() if pil_img.format else None)
+    except Exception:
+        return None, None, None
+
+
+def _visual_from_anchor(anchor_type: str, frm: dict, to: dict):
+    if not frm:
+        return None, None, "low"
+    if anchor_type == "twoCellAnchor" and to:
+        row = max(1, round((frm["row"] + to["row"]) / 2))
+        col = max(1, round((frm["col"] + to["col"]) / 2))
+        return row, col, "high"
+    return frm["row"], frm["col"], "medium"
+
+
+def _collect_images_ooxml(xlsx_path: Path, wb):
+    """Parse OOXML drawing relationships for more accurate image placement metadata."""
+    images_by_sheet = {name: [] for name in wb.sheetnames}
+    with zipfile.ZipFile(xlsx_path) as zf:
+        names = set(zf.namelist())
+        wb_xml = "xl/workbook.xml"
+        if wb_xml not in names:
+            return images_by_sheet
+
+        wb_rels = _read_rels(zf, "xl/_rels/workbook.xml.rels")
+        root = ET.fromstring(zf.read(wb_xml))
+        sheet_paths = {}
+        for sh in root.findall(".//{*}sheet"):
+            name = sh.attrib.get("name")
+            rid = sh.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+            target = wb_rels.get(rid, {}).get("Target") if rid else None
+            if name and target:
+                sheet_paths[name] = _resolve_target(wb_xml, target)
+
+        for sheet_name in wb.sheetnames:
+            sheet_xml = sheet_paths.get(sheet_name)
+            if not sheet_xml or sheet_xml not in names:
+                continue
+            sheet_root = ET.fromstring(zf.read(sheet_xml))
+            sheet_rels = _read_rels(zf, _rel_path(sheet_xml))
+            drawing_nodes = sheet_root.findall(".//{*}drawing")
+            idx = 0
+            for drawing in drawing_nodes:
+                rid = drawing.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+                target = sheet_rels.get(rid, {}).get("Target") if rid else None
+                if not target:
+                    continue
+                drawing_xml = _resolve_target(sheet_xml, target)
+                if drawing_xml not in names:
+                    continue
+                drawing_rels = _read_rels(zf, _rel_path(drawing_xml))
+                drawing_root = ET.fromstring(zf.read(drawing_xml))
+
+                for anchor in list(drawing_root):
+                    anchor_type = anchor.tag.split("}")[-1]
+                    if anchor_type not in {"oneCellAnchor", "twoCellAnchor", "absoluteAnchor"}:
+                        continue
+                    blip = anchor.find(".//{*}blip")
+                    embed = None
+                    if blip is not None:
+                        embed = blip.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+                    media_target = drawing_rels.get(embed, {}).get("Target") if embed else None
+                    if not media_target:
+                        continue
+                    media_path = _resolve_target(drawing_xml, media_target)
+                    if media_path not in names:
+                        continue
+
+                    data = zf.read(media_path)
+                    width, height, fmt = _image_size(data)
+                    ext = (fmt or Path(media_path).suffix.lstrip(".") or "png").lower()
+                    idx += 1
+                    filename = f"{slugify(sheet_name)}_img_{idx}.{ext}"
+
+                    frm = _marker(anchor, "from")
+                    to = _marker(anchor, "to") if anchor_type == "twoCellAnchor" else None
+                    visual_row, visual_col, confidence = _visual_from_anchor(anchor_type, frm, to)
+                    anchor_row = frm["row"] if frm else visual_row
+                    anchor_col = frm["col"] if frm else visual_col
+                    to_row = to["row"] if to else anchor_row
+                    to_col = to["col"] if to else anchor_col
+
+                    images_by_sheet[sheet_name].append({
+                        "file": f"images/{filename}",
+                        "row": visual_row,
+                        "col": visual_col,
+                        "cell": cell_addr(visual_row, visual_col),
+                        "anchor_cell": cell_addr(anchor_row, anchor_col),
+                        "visual_cell": cell_addr(visual_row, visual_col),
+                        "range": range_addr(anchor_row, anchor_col, to_row, to_col),
+                        "anchor_type": anchor_type,
+                        "offset": {
+                            "from_col_emu": frm.get("colOff") if frm else None,
+                            "from_row_emu": frm.get("rowOff") if frm else None,
+                            "to_col_emu": to.get("colOff") if to else None,
+                            "to_row_emu": to.get("rowOff") if to else None,
+                        },
+                        "confidence": confidence,
+                        "placement": "ooxml",
+                        "source": media_path,
+                        "status": "mapped" if visual_row and visual_col else "unmapped",
+                        "width": width,
+                        "height": height,
+                        "_data": data,
+                        "_hash": hashlib.sha256(data).hexdigest(),
+                    })
+    return images_by_sheet
+
+
 def collect_sheet_images(sheet, sheet_slug: str):
+    """Fallback image collection through openpyxl when OOXML parsing is unavailable."""
     records = []
     for i, img in enumerate(sheet._images):
         try:
             data = img._data()
-            pil_img = __import__("PIL.Image", fromlist=["Image"]).open(BytesIO(data))
-            ext = pil_img.format.lower() if pil_img.format else "png"
+            width, height, fmt = _image_size(data)
+            ext = fmt or "png"
             filename = f"{sheet_slug}_img_{i + 1}.{ext}"
 
             anchor = img.anchor
             if hasattr(anchor, "_from"):
                 row = anchor._from.row + 1
                 col = anchor._from.col + 1
-                col_letter = get_column_letter(col)
             else:
-                row, col, col_letter = None, None, None
+                row, col = None, None
 
             records.append({
                 "file": f"images/{filename}",
                 "row": row,
                 "col": col,
-                "cell": f"{col_letter}{row}" if col_letter else None,
+                "cell": cell_addr(row, col),
+                "anchor_cell": cell_addr(row, col),
+                "visual_cell": cell_addr(row, col),
+                "range": range_addr(row, col),
+                "anchor_type": type(anchor).__name__ if anchor else None,
+                "confidence": "medium" if row and col else "low",
+                "placement": "openpyxl-fallback",
                 "source": "openpyxl",
                 "status": "mapped" if row and col else "unmapped",
-                "width": getattr(pil_img, "width", None),
-                "height": getattr(pil_img, "height", None),
+                "width": width,
+                "height": height,
                 "_data": data,
                 "_hash": hashlib.sha256(data).hexdigest(),
             })
@@ -213,13 +405,20 @@ def collect_sheet_images(sheet, sheet_slug: str):
     return records
 
 
-def collect_images(wb):
-    images_by_sheet = {}
-    known_hashes = set()
+def collect_images(xlsx_path: Path, wb):
+    images_by_sheet = {name: [] for name in wb.sheetnames}
+    try:
+        images_by_sheet = _collect_images_ooxml(xlsx_path, wb)
+    except Exception:
+        images_by_sheet = {name: [] for name in wb.sheetnames}
+
+    # Fallback per sheet if OOXML produced no placements for that sheet.
     for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        records = collect_sheet_images(ws, slugify(sheet_name))
-        images_by_sheet[sheet_name] = records
+        if not images_by_sheet.get(sheet_name):
+            images_by_sheet[sheet_name] = collect_sheet_images(wb[sheet_name], slugify(sheet_name))
+
+    known_hashes = set()
+    for records in images_by_sheet.values():
         for rec in records:
             if rec.get("_hash"):
                 known_hashes.add(rec["_hash"])
@@ -270,6 +469,35 @@ def write_image_records(records: list, fmt_dir: Path):
         out_path.write_bytes(data)
 
 
+def markdown_images_section(images: list) -> str:
+    mapped = [r for r in images if r.get("file") and (r.get("visual_cell") or r.get("cell") or r.get("range"))]
+    if not mapped:
+        return ""
+    lines = ["", "## Images", ""]
+    for rec in mapped:
+        rng = rec.get("range") or rec.get("cell") or "unmapped"
+        placed = rec.get("visual_cell") or rec.get("cell") or "unmapped"
+        confidence = rec.get("confidence") or "unknown"
+        file = rec["file"]
+        lines.append(f"- `{rng}`, placed at `{placed}` ({confidence}): ![image at {placed}](../{file})")
+    return "\n".join(lines) + "\n"
+
+
+def html_images_section(images: list) -> str:
+    mapped = [r for r in images if r.get("file") and (r.get("visual_cell") or r.get("cell") or r.get("range"))]
+    if not mapped:
+        return ""
+    items = []
+    for rec in mapped:
+        rng = rec.get("range") or rec.get("cell") or "unmapped"
+        placed = rec.get("visual_cell") or rec.get("cell") or "unmapped"
+        confidence = rec.get("confidence") or "unknown"
+        file = rec["file"]
+        items.append(f'<li><code>{rng}</code>, placed at <code>{placed}</code> ({confidence}): '
+                     f'<img src="../{file}" alt="image at {placed}" style="max-width:240px"></li>')
+    return "<h2>Images</h2><ul>" + "".join(items) + "</ul>"
+
+
 def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sheet: dict, unmapped_media: list):
     """Extract all sheets for a single format into fmt_dir."""
     sheets_dir = fmt_dir / "sheets"
@@ -293,10 +521,10 @@ def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sh
         img_map = {}
         for rec in images:
             if rec.get("row") and rec.get("col"):
-                img_map.setdefault((rec["row"], rec["col"]), []).append(rec["file"])
+                img_map.setdefault((rec["row"], rec["col"]), []).append(rec)
 
         if fmt == "html":
-            content = sheet_to_html(ws, img_map=img_map)
+            content = sheet_to_html(ws, img_map=img_map) + html_images_section(images)
             sheet_file = sheets_dir / f"{slug}.html"
             html_doc = (
                 f'<!DOCTYPE html><html><head><meta charset="utf-8">'
@@ -305,7 +533,7 @@ def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sh
             )
             sheet_file.write_text(html_doc, encoding="utf-8")
         else:
-            content = sheet_to_markdown(ws, img_map=img_map)
+            content = sheet_to_markdown(ws, img_map=img_map) + markdown_images_section(images)
             sheet_file = sheets_dir / f"{slug}.md"
             sheet_file.write_text(f"# {sheet_name}\n\n{content}", encoding="utf-8")
 
@@ -331,7 +559,7 @@ def extract(xlsx_path: str, output_dir: str = "output", formats: list = None):
 
     print(f"Loading {src.name} ...")
     wb = load_workbook(src, data_only=True, rich_text=True)
-    images_by_sheet, known_hashes = collect_images(wb)
+    images_by_sheet, known_hashes = collect_images(src, wb)
     unmapped_media = collect_unmapped_media(src, known_hashes)
 
     fmt_label = {"md": "markdown", "html": "html"}
