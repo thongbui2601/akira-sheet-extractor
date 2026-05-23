@@ -313,23 +313,6 @@ def _collect_images_ooxml(xlsx_path: Path, wb):
                     anchor_type = anchor.tag.split("}")[-1]
                     if anchor_type not in {"oneCellAnchor", "twoCellAnchor", "absoluteAnchor"}:
                         continue
-                    blip = anchor.find(".//{*}blip")
-                    embed = None
-                    if blip is not None:
-                        embed = blip.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
-                    media_target = drawing_rels.get(embed, {}).get("Target") if embed else None
-                    if not media_target:
-                        continue
-                    media_path = _resolve_target(drawing_xml, media_target)
-                    if media_path not in names:
-                        continue
-
-                    data = zf.read(media_path)
-                    width, height, fmt = _image_size(data)
-                    ext = (fmt or Path(media_path).suffix.lstrip(".") or "png").lower()
-                    idx += 1
-                    filename = f"{slugify(sheet_name)}_img_{idx}.{ext}"
-
                     frm = _marker(anchor, "from")
                     to = _marker(anchor, "to") if anchor_type == "twoCellAnchor" else None
                     visual_row, visual_col, confidence = _visual_from_anchor(anchor_type, frm, to)
@@ -338,30 +321,47 @@ def _collect_images_ooxml(xlsx_path: Path, wb):
                     to_row = to["row"] if to else anchor_row
                     to_col = to["col"] if to else anchor_col
 
-                    images_by_sheet[sheet_name].append({
-                        "file": f"images/{filename}",
-                        "row": visual_row,
-                        "col": visual_col,
-                        "cell": cell_addr(visual_row, visual_col),
-                        "anchor_cell": cell_addr(anchor_row, anchor_col),
-                        "visual_cell": cell_addr(visual_row, visual_col),
-                        "range": range_addr(anchor_row, anchor_col, to_row, to_col),
-                        "anchor_type": anchor_type,
-                        "offset": {
-                            "from_col_emu": frm.get("colOff") if frm else None,
-                            "from_row_emu": frm.get("rowOff") if frm else None,
-                            "to_col_emu": to.get("colOff") if to else None,
-                            "to_row_emu": to.get("rowOff") if to else None,
-                        },
-                        "confidence": confidence,
-                        "placement": "ooxml",
-                        "source": media_path,
-                        "status": "mapped" if visual_row and visual_col else "unmapped",
-                        "width": width,
-                        "height": height,
-                        "_data": data,
-                        "_hash": hashlib.sha256(data).hexdigest(),
-                    })
+                    blips = anchor.findall(".//{*}blip")
+                    for blip_index, blip in enumerate(blips, start=1):
+                        embed = blip.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+                        media_target = drawing_rels.get(embed, {}).get("Target") if embed else None
+                        if not media_target:
+                            continue
+                        media_path = _resolve_target(drawing_xml, media_target)
+                        if media_path not in names:
+                            continue
+
+                        data = zf.read(media_path)
+                        width, height, fmt = _image_size(data)
+                        ext = (fmt or Path(media_path).suffix.lstrip(".") or "png").lower()
+                        idx += 1
+                        filename = f"{slugify(sheet_name)}_img_{idx}.{ext}"
+
+                        images_by_sheet[sheet_name].append({
+                            "file": f"images/{filename}",
+                            "row": visual_row,
+                            "col": visual_col,
+                            "cell": cell_addr(visual_row, visual_col),
+                            "anchor_cell": cell_addr(anchor_row, anchor_col),
+                            "visual_cell": cell_addr(visual_row, visual_col),
+                            "range": range_addr(anchor_row, anchor_col, to_row, to_col),
+                            "anchor_type": anchor_type,
+                            "anchor_image_index": blip_index if len(blips) > 1 else None,
+                            "offset": {
+                                "from_col_emu": frm.get("colOff") if frm else None,
+                                "from_row_emu": frm.get("rowOff") if frm else None,
+                                "to_col_emu": to.get("colOff") if to else None,
+                                "to_row_emu": to.get("rowOff") if to else None,
+                            },
+                            "confidence": confidence,
+                            "placement": "ooxml",
+                            "source": media_path,
+                            "status": "mapped" if visual_row and visual_col else "unmapped",
+                            "width": width,
+                            "height": height,
+                            "_data": data,
+                            "_hash": hashlib.sha256(data).hexdigest(),
+                        })
     return images_by_sheet
 
 
