@@ -90,12 +90,18 @@ def _img_range(img):
     return img.get("range") or _img_cell(img)
 
 
-def sheet_to_markdown(sheet, img_map: dict = None) -> str:
+def _shape_inline(text: str) -> str:
+    """Collapse shape text to a single line for embedding inside a table cell."""
+    return text.replace("\n", " / ")
+
+
+def sheet_to_markdown(sheet, img_map: dict = None, shape_map: dict = None) -> str:
     if sheet.max_row is None or sheet.max_column is None:
         return "_empty sheet_\n"
 
     merged_map, covered = get_merged_map(sheet)
     img_map = img_map or {}
+    shape_map = shape_map or {}
     image_rows = [r for r, _ in img_map.keys() if r]
     image_cols = [c for _, c in img_map.keys() if c]
     max_row = max([sheet.max_row] + image_rows)
@@ -122,6 +128,10 @@ def sheet_to_markdown(sheet, img_map: dict = None) -> str:
                     parts.append(f"<!-- image{meta} --> ![](../{f})")
                 img_md = " ".join(parts)
                 cell_str = f"{cell_str} {img_md}".strip()
+            shapes = shape_map.get((r, c), [])
+            if shapes:
+                shape_parts = [f"<!-- shape --> *{_shape_inline(s['text'])}*" for s in shapes]
+                cell_str = f"{cell_str} {' '.join(shape_parts)}".strip()
             row.append(cell_str)
         # trim trailing empty cells
         while row and row[-1] == "":
@@ -153,12 +163,13 @@ def md_strike_to_html(text: str) -> str:
     return re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
 
 
-def sheet_to_html(sheet, img_map: dict = None) -> str:
+def sheet_to_html(sheet, img_map: dict = None, shape_map: dict = None) -> str:
     if sheet.max_row is None or sheet.max_column is None:
         return "<p><em>empty sheet</em></p>\n"
 
     merged_map, covered = get_merged_map(sheet)
     img_map = img_map or {}
+    shape_map = shape_map or {}
     image_rows = [r for r, _ in img_map.keys() if r]
     image_cols = [c for _, c in img_map.keys() if c]
     max_row = max([sheet.max_row] + image_rows)
@@ -177,7 +188,14 @@ def sheet_to_html(sheet, img_map: dict = None) -> str:
             if imgs:
                 img_tags = "".join(f'<img src="../{_img_file(img)}" style="max-width:100%">' for img in imgs)
                 text = f"{text}{img_tags}" if text else img_tags
-            if text or imgs:
+            shapes = shape_map.get((r, c), [])
+            if shapes:
+                shape_html = "".join(
+                    f'<div style="font-style:italic;color:#555;border-left:3px solid #ccc;padding-left:4px;margin-top:2px">{s["text"].replace(chr(10), "<br>")}</div>'
+                    for s in shapes
+                )
+                text = f"{text}{shape_html}" if text else shape_html
+            if text or imgs or shapes:
                 has_content = True
             if (r, c) in merged_map:
                 _, rowspan, colspan = merged_map[(r, c)]
@@ -269,6 +287,83 @@ def _visual_from_anchor(anchor_type: str, frm: dict, to: dict):
         col = max(1, round((frm["col"] + to["col"]) / 2))
         return row, col, "high"
     return frm["row"], frm["col"], "medium"
+
+
+def _extract_txbody_text(txBody) -> str:
+    """Extract plain text from a DrawingML txBody, preserving paragraph breaks."""
+    paragraphs = []
+    for para in txBody.findall(".//{*}p"):
+        runs = [t.text for t in para.findall(".//{*}t") if t.text]
+        line = "".join(runs)
+        if line:
+            paragraphs.append(line)
+    return "\n".join(paragraphs)
+
+
+def _collect_shapes_ooxml(xlsx_path: Path, wb) -> dict:
+    """Collect text from shapes (text boxes, callouts, etc.) in drawing XMLs."""
+    shapes_by_sheet = {name: [] for name in wb.sheetnames}
+    with zipfile.ZipFile(xlsx_path) as zf:
+        names = set(zf.namelist())
+        wb_xml = "xl/workbook.xml"
+        if wb_xml not in names:
+            return shapes_by_sheet
+
+        wb_rels = _read_rels(zf, "xl/_rels/workbook.xml.rels")
+        root = ET.fromstring(zf.read(wb_xml))
+        sheet_paths = {}
+        for sh in root.findall(".//{*}sheet"):
+            name = sh.attrib.get("name")
+            rid = sh.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+            target = wb_rels.get(rid, {}).get("Target") if rid else None
+            if name and target:
+                sheet_paths[name] = _resolve_target(wb_xml, target)
+
+        for sheet_name in wb.sheetnames:
+            sheet_xml = sheet_paths.get(sheet_name)
+            if not sheet_xml or sheet_xml not in names:
+                continue
+            sheet_root = ET.fromstring(zf.read(sheet_xml))
+            sheet_rels = _read_rels(zf, _rel_path(sheet_xml))
+            for drawing in sheet_root.findall(".//{*}drawing"):
+                rid = drawing.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+                target = sheet_rels.get(rid, {}).get("Target") if rid else None
+                if not target:
+                    continue
+                drawing_xml = _resolve_target(sheet_xml, target)
+                if drawing_xml not in names:
+                    continue
+                drawing_root = ET.fromstring(zf.read(drawing_xml))
+
+                for anchor in list(drawing_root):
+                    anchor_type = anchor.tag.split("}")[-1]
+                    if anchor_type not in {"oneCellAnchor", "twoCellAnchor", "absoluteAnchor"}:
+                        continue
+                    frm = _marker(anchor, "from")
+                    to = _marker(anchor, "to") if anchor_type == "twoCellAnchor" else None
+                    visual_row, visual_col, confidence = _visual_from_anchor(anchor_type, frm, to)
+                    anchor_row = frm["row"] if frm else visual_row
+                    anchor_col = frm["col"] if frm else visual_col
+                    to_row = to["row"] if to else anchor_row
+                    to_col = to["col"] if to else anchor_col
+
+                    for sp in anchor.findall(".//{*}sp"):
+                        txBody = sp.find(".//{*}txBody")
+                        if txBody is None:
+                            continue
+                        text = _extract_txbody_text(txBody)
+                        if not text:
+                            continue
+                        shapes_by_sheet[sheet_name].append({
+                            "text": text,
+                            "row": visual_row,
+                            "col": visual_col,
+                            "cell": cell_addr(visual_row, visual_col),
+                            "range": range_addr(anchor_row, anchor_col, to_row, to_col),
+                            "anchor_type": anchor_type,
+                            "confidence": confidence,
+                        })
+    return shapes_by_sheet
 
 
 def _collect_images_ooxml(xlsx_path: Path, wb):
@@ -498,7 +593,37 @@ def html_images_section(images: list) -> str:
     return "<h2>Images</h2><ul>" + "".join(items) + "</ul>"
 
 
-def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sheet: dict, unmapped_media: list):
+def markdown_shapes_section(shapes: list) -> str:
+    if not shapes:
+        return ""
+    lines = ["", "## Text Boxes", ""]
+    for s in shapes:
+        loc = s.get("range") or s.get("cell") or "unknown"
+        placed = s.get("cell") or "unknown"
+        confidence = s.get("confidence") or "unknown"
+        text = s["text"]
+        first_line = text.split("\n")[0]
+        rest = text.split("\n")[1:]
+        lines.append(f"- `{loc}`, placed at `{placed}` ({confidence}): {first_line}")
+        for line in rest:
+            lines.append(f"  {line}")
+    return "\n".join(lines) + "\n"
+
+
+def html_shapes_section(shapes: list) -> str:
+    if not shapes:
+        return ""
+    items = []
+    for s in shapes:
+        loc = s.get("range") or s.get("cell") or "unknown"
+        placed = s.get("cell") or "unknown"
+        confidence = s.get("confidence") or "unknown"
+        text_html = s["text"].replace("\n", "<br>")
+        items.append(f'<li><code>{loc}</code>, placed at <code>{placed}</code> ({confidence}): {text_html}</li>')
+    return "<h2>Text Boxes</h2><ul>" + "".join(items) + "</ul>"
+
+
+def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sheet: dict, shapes_by_sheet: dict, unmapped_media: list):
     """Extract all sheets for a single format into fmt_dir."""
     sheets_dir = fmt_dir / "sheets"
     images_dir = fmt_dir / "images"
@@ -523,8 +648,14 @@ def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sh
             if rec.get("row") and rec.get("col"):
                 img_map.setdefault((rec["row"], rec["col"]), []).append(rec)
 
+        shapes = shapes_by_sheet.get(sheet_name, [])
+        shape_map = {}
+        for s in shapes:
+            if s.get("row") and s.get("col"):
+                shape_map.setdefault((s["row"], s["col"]), []).append(s)
+
         if fmt == "html":
-            content = sheet_to_html(ws, img_map=img_map) + html_images_section(images)
+            content = sheet_to_html(ws, img_map=img_map, shape_map=shape_map) + html_images_section(images) + html_shapes_section(shapes)
             sheet_file = sheets_dir / f"{slug}.html"
             html_doc = (
                 f'<!DOCTYPE html><html><head><meta charset="utf-8">'
@@ -533,7 +664,7 @@ def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sh
             )
             sheet_file.write_text(html_doc, encoding="utf-8")
         else:
-            content = sheet_to_markdown(ws, img_map=img_map) + markdown_images_section(images)
+            content = sheet_to_markdown(ws, img_map=img_map, shape_map=shape_map) + markdown_images_section(images) + markdown_shapes_section(shapes)
             sheet_file = sheets_dir / f"{slug}.md"
             sheet_file.write_text(f"# {sheet_name}\n\n{content}", encoding="utf-8")
 
@@ -543,6 +674,7 @@ def _extract_one_format(wb, src_name: str, fmt_dir: Path, fmt: str, images_by_sh
             "rows": ws.max_row,
             "cols": ws.max_column,
             "images": [public_image_record(r) for r in images],
+            "shapes": shapes,
         })
 
     write_image_records(unmapped_media, fmt_dir)
@@ -561,6 +693,10 @@ def extract(xlsx_path: str, output_dir: str = "output", formats: list = None):
     wb = load_workbook(src, data_only=True, rich_text=True)
     images_by_sheet, known_hashes = collect_images(src, wb)
     unmapped_media = collect_unmapped_media(src, known_hashes)
+    try:
+        shapes_by_sheet = _collect_shapes_ooxml(src, wb)
+    except Exception:
+        shapes_by_sheet = {name: [] for name in wb.sheetnames}
 
     fmt_label = {"md": "markdown", "html": "html"}
     total_sheets = len(wb.sheetnames)
@@ -569,10 +705,12 @@ def extract(xlsx_path: str, output_dir: str = "output", formats: list = None):
         label = fmt_label.get(fmt, fmt)
         fmt_dir = out / label
         print(f"\n[{label}]")
-        manifest = _extract_one_format(wb, src.name, fmt_dir, fmt, images_by_sheet, unmapped_media)
+        manifest = _extract_one_format(wb, src.name, fmt_dir, fmt, images_by_sheet, shapes_by_sheet, unmapped_media)
         total_images = sum(len(s["images"]) for s in manifest["sheets"])
-        print(f"  Sheets : {total_sheets}")
-        print(f"  Images : {total_images}")
+        total_shapes = sum(len(s.get("shapes", [])) for s in manifest["sheets"])
+        print(f"  Sheets     : {total_sheets}")
+        print(f"  Images     : {total_images}")
+        print(f"  Text boxes : {total_shapes}")
         if manifest.get("unmapped_media"):
             print(f"  Unmapped media: {len(manifest['unmapped_media'])}")
         print(f"  Manifest: {fmt_dir / 'manifest.json'}")
